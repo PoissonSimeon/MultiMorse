@@ -8,7 +8,7 @@ const htmlContent = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>MultiMorse V0.8</title>
+    <title>MultiMorse SDR</title>
     <style>
         :root {
             --bg-body: #0b0c10;
@@ -125,7 +125,7 @@ const htmlContent = `
 <body>
     
     <div class="app-wrapper">
-        <h2>MultiMorse V0.8</h2>
+        <h2>MultiMorse SDR</h2>
         
         <div class="waterfall-container" id="wf-container">
             <canvas id="waterfall"></canvas>
@@ -246,12 +246,21 @@ const htmlContent = `
         window.addEventListener('touchmove', (e) => { if(isDraggingFreq) setFreqFromPointer(e); }, {passive: false});
         window.addEventListener('touchend', () => { isDraggingFreq = false; });
 
-        // --- Réseau ---
-        const ws = new WebSocket('ws://' + window.location.host);
+        // --- Réseau Dynamique et Sécurisé ---
+        // Détecte automatiquement s'il faut utiliser ws:// (local) ou wss:// (prod HTTPS)
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(wsProtocol + '//' + window.location.host);
 
         ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            handleSignal(data.id, data.freq, data.state, data.wave);
+            try {
+                // Protection contre les erreurs JSON envoyées par un hackeur
+                const data = JSON.parse(event.data);
+                if (data.id && typeof data.freq === 'number' && data.state) {
+                    handleSignal(data.id, data.freq, data.state, data.wave);
+                }
+            } catch (err) {
+                console.warn("Message malformé ignoré");
+            }
         };
 
         function initAudio() {
@@ -276,7 +285,8 @@ const htmlContent = `
                     if (!env) {
                         const osc = audioCtx.createOscillator();
                         const gainNode = audioCtx.createGain();
-                        osc.type = wave;
+                        // Tolérance d'erreur sur la forme d'onde
+                        osc.type = ['sine', 'square', 'sawtooth', 'triangle'].includes(wave) ? wave : 'sine';
                         osc.frequency.value = freq;
                         
                         gainNode.gain.value = 0; 
@@ -288,7 +298,7 @@ const htmlContent = `
                         env = { osc, gainNode };
                         oscillators[id] = env;
                     } else {
-                        env.osc.type = wave;
+                        env.osc.type = ['sine', 'square', 'sawtooth', 'triangle'].includes(wave) ? wave : 'sine';
                         env.osc.frequency.value = freq; 
                     }
                     
@@ -335,17 +345,14 @@ const htmlContent = `
         // --- Support Clavier (Barre Espace) ---
         window.addEventListener('keydown', (e) => {
             if (e.code === 'Space') {
-                e.preventDefault(); // Empêche la page de défiler
-                if (!e.repeat) {
-                    startTransmit();
-                }
+                e.preventDefault(); 
+                if (!e.repeat) { startTransmit(); }
             }
         });
 
         window.addEventListener('keyup', (e) => {
             if (e.code === 'Space') {
-                e.preventDefault();
-                stopTransmit();
+                e.preventDefault(); stopTransmit();
             }
         });
 
@@ -362,7 +369,7 @@ const htmlContent = `
             activeSignals.forEach((signalData, id) => {
                 const x = ((signalData.freq - 300) / 500) * width;
                 if (signalData.isMe) {
-                    ctx.fillStyle = '#45a29e'; // Cyan mat (TX color)
+                    ctx.fillStyle = '#45a29e'; 
                 } else {
                     const isInsideBand = Math.abs(signalData.freq - rxFreq) <= (rxBandwidth / 2);
                     ctx.fillStyle = isInsideBand ? '#66ff66' : '#225522'; 
@@ -377,27 +384,82 @@ const htmlContent = `
 </html>
 `;
 
-// --- 2. LE SERVEUR WEB (BACK-END) ---
-const PORT = 8080;
+// --- 2. LE SERVEUR WEB (BACK-END PROD) ---
+// Utilisation du port dynamique (process.env.PORT) pour les hébergeurs
+const PORT = process.env.PORT || 8080;
 
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(htmlContent);
 });
 
-const wss = new WebSocket.Server({ server });
+// Limite la taille des messages entrants (1024 octets max) pour éviter les attaques Buffer Overflow
+const wss = new WebSocket.Server({ server, maxPayload: 1024 });
+
+// Fonction de Heartbeat (Ping/Pong)
+function heartbeat() {
+    this.isAlive = true;
+}
 
 wss.on('connection', function connection(ws) {
+    ws.isAlive = true;
+    ws.on('pong', heartbeat);
+
     ws.on('message', function incoming(message) {
-        wss.clients.forEach(function each(client) {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(message.toString());
-            }
-        });
+        // Prévention 1: Convertir le Buffer en String
+        const msgString = message.toString();
+
+        // Prévention 2: Vérifier la taille par sécurité supplémentaire
+        if (msgString.length > 300) return; 
+
+        try {
+            // Prévention 3: Vérifier que c'est bien du JSON valide
+            const data = JSON.parse(msgString);
+            
+            // Prévention 4: Validation stricte des données (Sanitization)
+            if (typeof data.id !== 'string' || data.id.length > 15) return;
+            if (typeof data.freq !== 'number' || isNaN(data.freq)) return;
+            if (data.state !== 'on' && data.state !== 'off') return;
+            
+            // Format d'onde valide
+            const allowedWaves = ['sine', 'square', 'sawtooth', 'triangle'];
+            const safeWave = allowedWaves.includes(data.wave) ? data.wave : 'sine';
+
+            // Création d'un payload propre et sécurisé à renvoyer (efface les champs injéctés)
+            const safePayload = JSON.stringify({
+                id: data.id,
+                freq: Math.max(100, Math.min(2000, data.freq)), // Clampe la fréquence
+                state: data.state,
+                wave: safeWave
+            });
+
+            // Redistribution sécurisée
+            wss.clients.forEach(function each(client) {
+                if (client.readyState === WebSocket.OPEN) {
+                    client.send(safePayload);
+                }
+            });
+
+        } catch (e) {
+            // Message malformé ou tentative de hack => on l'ignore silencieusement
+        }
     });
 });
 
+// Nettoyage régulier des connexions mortes (Nginx/Cloudflare Timeout Prevention)
+const interval = setInterval(function ping() {
+    wss.clients.forEach(function each(ws) {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000); // Toutes les 30 secondes
+
+wss.on('close', function close() {
+    clearInterval(interval);
+});
+
 server.listen(PORT, () => {
-    console.log(`[MultiMorse V0.8] Serveur radio opérationnel.`);
-    console.log(`> Interface accessible sur : http://localhost:${PORT}`);
+    console.log(`[MultiMorse PROD] Serveur radio opérationnel.`);
+    console.log(`> Port d'écoute : ${PORT}`);
 });
