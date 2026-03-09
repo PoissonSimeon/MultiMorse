@@ -255,6 +255,10 @@ const htmlContent = `
             try {
                 // Protection contre les erreurs JSON envoyées par un hackeur
                 const data = JSON.parse(event.data);
+                
+                // --- ZERO LATENCE : On ignore nos propres messages venant du serveur ---
+                if (data.id === myId) return;
+
                 if (data.id && typeof data.freq === 'number' && data.state) {
                     handleSignal(data.id, data.freq, data.state, data.wave);
                 }
@@ -326,6 +330,10 @@ const htmlContent = `
             if(isTransmitting) return;
             isTransmitting = true;
             btn.classList.add('active'); 
+            
+            // --- ZERO LATENCE : Déclenchement local instantané ---
+            handleSignal(myId, txFreq, 'on', txWaveform);
+            
             ws.send(JSON.stringify({ id: myId, freq: txFreq, state: 'on', wave: txWaveform }));
         }
 
@@ -333,6 +341,10 @@ const htmlContent = `
             if (!isTransmitting) return;
             isTransmitting = false;
             btn.classList.remove('active');
+            
+            // --- ZERO LATENCE : Arrêt local instantané ---
+            handleSignal(myId, txFreq, 'off');
+            
             ws.send(JSON.stringify({ id: myId, freq: txFreq, state: 'off' }));
         }
 
