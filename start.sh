@@ -3,7 +3,7 @@
 # Se place automatiquement dans le dossier où se trouve ce script bash
 cd "$(dirname "$0")"
 
-SCRIPT_NAME="MultiMorseProd.js"
+SCRIPT_NAME="MultiMorse.js"
 
 echo "========================================="
 echo "  Démarrage du Serveur MultiMorse SDR"
